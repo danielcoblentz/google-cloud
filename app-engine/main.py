@@ -1,58 +1,69 @@
-# Copyright 2018 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# [START gae_python37_cloudsql_mysql]
-import os
-
-from flask import Flask
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 import pymysql
-
-db_user = os.environ.get('CLOUD_SQL_USERNAME')
-db_password = os.environ.get('CLOUD_SQL_PASSWORD')
-db_name = os.environ.get('CLOUD_SQL_DATABASE_NAME')
-db_connection_name = os.environ.get('CLOUD_SQL_CONNECTION_NAME')
+import os
+import bcrypt  # Ensure bcrypt is installed
 
 app = Flask(__name__)
 
+def open_connection():
+    """Establish a database connection."""
+    try:
+        connection = pymysql.connect(
+            user=os.getenv('CLOUD_SQL_USERNAME'),
+            password=os.getenv('CLOUD_SQL_PASSWORD'),
+            db=os.getenv('CLOUD_SQL_DATABASE_NAME'),
+            host=os.getenv('CLOUD_SQL_HOST'),  # If using public IP, or `unix_socket` for Cloud SQL proxy
+            cursorclass=pymysql.cursors.DictCursor
+        )
+        return connection
+    except pymysql.MySQLError as e:
+        print(e)
+        return None
 
-@app.route('/')
-def main():
-    # When deployed to App Engine, the `GAE_ENV` environment variable will be
-    # set to `standard`
-    if os.environ.get('GAE_ENV') == 'standard':
-        # If deployed, use the local socket interface for accessing Cloud SQL
-        unix_socket = '/cloudsql/{}'.format(db_connection_name)
-        cnx = pymysql.connect(user=db_user, password=db_password,
-                              unix_socket=unix_socket, db=db_name)
-    else:
-        # If running locally, use the TCP connections instead
-        # Set up Cloud SQL Proxy (cloud.google.com/sql/docs/mysql/sql-proxy)
-        # so that your application can use 127.0.0.1:3306 to connect to your
-        # Cloud SQL instance
-        host = '127.0.0.1'
-        cnx = pymysql.connect(user=db_user, password=db_password,
-                              host=host, db=db_name)
+@app.route('/signup', methods=['POST'])
+def signup():
+    username = request.form.get('Uname')
+    password = request.form.get('Pass')
+    email = request.form.get('Email')
+    is_organizer = request.form.get('remember') == 'on'  # Checkbox value
 
-    with cnx.cursor() as cursor:
-        cursor.execute('YOUR QUERY GOES HERE;')
-        result = cursor.fetchall()
-        current_msg = result[0][0]
-    cnx.close()
+    if not username or not password or not email:
+        return jsonify({"msg": "Missing fields"}), 400
 
-    return str(current_msg)
-# [END gae_python37_cloudsql_mysql]
+    connection = open_connection()
+    if connection:
+        try:
+            with connection.cursor() as cursor:
+                # Check if the user already exists
+                cursor.execute("SELECT * FROM Users WHERE email = %s OR username = %s", (email, username))
+                user = cursor.fetchone()
 
+                if user:
+                    return jsonify({"msg": "User already exists"}), 400
+
+                # Hash the password
+                password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+                # Insert the new user
+                cursor.execute(
+                    "INSERT INTO Users (username, password_hash, email, is_organizer) VALUES (%s, %s, %s, %s)",
+                    (username, password_hash, email, is_organizer)
+                )
+                connection.commit()
+
+                return redirect(url_for('welcome'))
+
+        except pymysql.MySQLError as e:
+            return jsonify({"msg": str(e)}), 500
+
+        finally:
+            connection.close()
+
+    return jsonify({"msg": "Database connection failed"}), 500
+
+@app.route('/welcome', methods=['GET'])
+def welcome():
+    return "Welcome!"
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=8080, debug=True)
+    app.run(debug=True)
